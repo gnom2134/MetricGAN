@@ -1,11 +1,12 @@
-import torch
+from torch.utils.data import Dataset
 import os
 import librosa
 import numpy as np
 
 
 TEST_DATA_FOLDER = 'data/lisa/data/timit/raw/TIMIT/TEST/'
-TRAIN_DATA_FOLDER = 'data/lisa/data/timit/raw/TIMIT/TRAIN/'
+# TRAIN_DATA_FOLDER = 'data/lisa/data/timit/raw/TIMIT/TRAIN/'
+TRAIN_DATA_FOLDER = 'data/results/'
 NOISE_DATA_FOLDER = 'data/Nonspeech/'
 
 
@@ -24,7 +25,7 @@ def add_noise(signal, noise, snr):
     return signal + noise
 
 
-class TIMITDataset:
+class TIMITDataset(Dataset):
     def __init__(self, folder, noise_folder):
         self.file_paths = []
         self.noise_paths = []
@@ -41,14 +42,14 @@ class TIMITDataset:
     def __len__(self):
         return len(self.file_paths)
 
-    def __getitem__(self, index):
-        signal, _ = librosa.load(self.file_paths[index])
-        noise, _ = librosa.load(np.random.choice(self.noise_paths))
-        noisy_signal = add_noise(signal, noise, np.random.choice(np.arange(-10, 11, 1)))
+    def __getitem__(self, index, sr=16000):
+        signal, _ = librosa.load(self.file_paths[index], sr=sr)
+        noise, _ = librosa.load(np.random.choice(self.noise_paths), sr=sr)
+        noisy_signal = add_noise(signal, noise, np.random.choice(np.arange(-12, 13, 1)))
         return noisy_signal, signal
 
 
-class MixedDataset:
+class MixedDataset(Dataset):
     def __init__(self, enhanced_signals, folder, noise_folder):
         """
         :param enhanced_signals: list with tuples of format (enhanced_signal, clear_signal).
@@ -74,6 +75,11 @@ if __name__ == "__main__":
     n, _ = librosa.load("data/Nonspeech/n1.wav", sr=16000)
 
     res = add_noise(sig, n, 0)
+
+    from metrics import calculate_pesq, calculate_stoi
+
+    print(calculate_pesq(sig, sig, squeeze=False))
+    print(calculate_stoi(sig, sig))
 
     from scipy.io.wavfile import write
     write("data/results/res1_real.wav", sample_rate, sig)
