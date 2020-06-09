@@ -60,17 +60,17 @@ class DiscriminatorLoss(nn.Module):
     def forward(self, x, metric_value):
         result = torch.FloatTensor()
         for i in range(x.shape[0]):
-            result = torch.cat((result, - torch.log(1 - torch.abs(x[i] - metric_value))), 0)
+            result = torch.cat((result, - torch.log(1 - (x[i] - metric_value)**2)), 0)
         return result
 
 
 class GeneratorLoss(nn.Module):
-    def __init__(self, s=1):
+    def __init__(self, s=1.):
         super().__init__()
         self.s = s
 
     def forward(self, x):
         result = torch.FloatTensor()
         for i in range(x.shape[0]):
-            result = torch.cat(result, (x[i] - self.s)**2)
+            result = torch.cat((result,  - torch.log(1 - (x[i] - self.s)**2)), 0)
         return result
