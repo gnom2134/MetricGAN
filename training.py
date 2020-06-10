@@ -9,8 +9,13 @@ import torch
 
 from models import Generator, Discriminator, DiscriminatorLoss, GeneratorLoss
 from dataset import TIMITDataset, MixedDataset, TRAIN_DATA_FOLDER, TEST_DATA_FOLDER, NOISE_DATA_FOLDER
-from preprocessing import prepare_signal, back_to_wav, prepare_batch_of_signals
+from preprocessing import prepare_signal, back_to_wav
 from metrics import calculate_pesq, calculate_stoi
+
+
+DEVICE = torch.device("cuda:0")
+
+# TODO: fix connection between generator and discriminator
 
 
 def create_loaders(dataset, batch_size=1, create_val=True):
@@ -31,20 +36,30 @@ def create_loaders(dataset, batch_size=1, create_val=True):
         return DataLoader(dataset, batch_size=batch_size)
 
 
-def train_metric_gan(learning_iterations=200, batch_size=1, lr=1e-3, d_epochs=20, g_epochs=20):
+def calculate_metric(model, data_loader, metric):
+    pass
+
+
+def train_metric_gan(learning_iterations=200, batch_size=1, lr=1e-3, d_epochs=10, g_epochs=10):
     metric_history = []
-    generator = Generator()
-    discriminator = Discriminator()
+    generator = Generator(DEVICE)
+    discriminator = Discriminator(DEVICE)
 
     generator_dataset = TIMITDataset(TRAIN_DATA_FOLDER, NOISE_DATA_FOLDER)
-    test_dataset = TIMITDataset(TEST_DATA_FOLDER, NOISE_DATA_FOLDER)
 
     train_loader, val_loader = create_loaders(generator_dataset, batch_size)
-    test_loader = create_loaders(test_dataset, batch_size=batch_size, create_val=False)
 
-    discriminator_criterion = DiscriminatorLoss()
+    discriminator_criterion = DiscriminatorLoss(DEVICE)
     discriminator_optimizer = optim.Adam(discriminator.network.parameters(), lr=lr, betas=(0.9, 0.999))
     discriminator_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(discriminator_optimizer, 10, 2)
+
+    generator_criterion = GeneratorLoss(DEVICE, s=1.)
+    generator_optimizer = optim.Adam(
+        [{"params": generator.lstm.parameters()}, {"params": generator.fc.parameters()}],
+        lr=lr,
+        betas=(.9, .999)
+    )
+    generator_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(generator_optimizer, 10, 2)
 
     for _ in tqdm(range(learning_iterations), desc='GAN learning iteration'):
         generated_data = []
@@ -53,14 +68,13 @@ def train_metric_gan(learning_iterations=200, batch_size=1, lr=1e-3, d_epochs=20
             generator.eval()
             for x, y in tqdm(train_loader, desc='Generating data...', leave=False):
                 x, phase, sl = prepare_signal(x)
+                x = x.to(DEVICE)
                 x = x.reshape((1, -1, 257))
-                generated_data.append((back_to_wav(x * np.maximum(0.05, generator(x)), phase, sl), y))
+                generated_data.append((back_to_wav(x * np.maximum(0.05, generator(x).cpu().numpy()), phase, sl), y))
 
         d_dataset = MixedDataset(generated_data, TRAIN_DATA_FOLDER, NOISE_DATA_FOLDER)
         d_train_loader, d_val_loader = create_loaders(d_dataset, batch_size=batch_size)
 
-        metric_values = []
-        avg_metric = 0
         generator.train(False)
         discriminator.train(True)
         p_bar = tqdm(range(d_epochs), desc="Training discriminator...", leave=False)
@@ -68,6 +82,9 @@ def train_metric_gan(learning_iterations=200, batch_size=1, lr=1e-3, d_epochs=20
             for x, y in tqdm(d_train_loader, desc="I'm just doing my thing...", leave=False):
                 x, phase, sl = prepare_signal(x)
                 y, y_phase, y_sl = prepare_signal(y)
+                x = x.to(DEVICE)
+                y = y.to(DEVICE)
+
                 x = x.reshape((1, -1, 257))
                 y = y.reshape((1, -1, 257))
 
@@ -82,16 +99,49 @@ def train_metric_gan(learning_iterations=200, batch_size=1, lr=1e-3, d_epochs=20
                 loss = discriminator_criterion(res, metric)
                 loss.backward()
                 discriminator_optimizer.step()
-                metric_values.append(np.abs(res.detach().numpy() - metric))
 
-                print(f"Metric: {metric}, discriminator error: {np.abs(res.detach().numpy() - metric)}")
+                print(f"Metric: {metric}, discriminator error: {np.abs(res.detach().cpu().numpy() - metric)}")
 
             discriminator_scheduler.step()
-            avg_metric = np.mean(metric_values)
-            p_bar.set_description(desc=f"Training discriminator... Epoch: {epoch}, avg_metric: {avg_metric}")
+            p_bar.set_description(desc=f"Training discriminator... Epoch: {epoch}")
+
+        avg_metric = 0
+        generator.train(True)
+        discriminator.train(False)
+        p_bar = tqdm(range(g_epochs), desc="Training generator...", leave=False)
+        for epoch in p_bar:
+            for x, y in tqdm(train_loader, desc="I'm just doing my thing...", leave=False):
+                x, phase, sl = prepare_signal(x)
+                y, y_phase, y_sl = prepare_signal(y)
+                x = x.reshape((1, -1, 257))
+                y = y.reshape((1, -1, 257))
+
+                try:
+                    metric = calculate_stoi(back_to_wav(x, phase, sl), back_to_wav(y, y_phase, y_sl))
+                except Exception as err:
+                    print(err)
+                    metric = 0.
+
+                generator_optimizer.zero_grad()
+                res = discriminator(x, y)
+                loss = generator_criterion(res, metric)
+                loss.backward()
+                generator_optimizer.step()
+                avg_metric = res.detach().cpu().numpy()
+
+                print(f"Metric: {metric}")
+
+            generator_scheduler.step()
+            p_bar.set_description(desc=f"Training generator... Epoch: {epoch}, avg_metric: {avg_metric}")
 
         metric_history.append(avg_metric)
 
+    return generator
+
 
 if __name__ == "__main__":
-    train_metric_gan()
+    batch_size = 1
+    trained_generator = train_metric_gan(batch_size=batch_size)
+
+    test_dataset = TIMITDataset(TEST_DATA_FOLDER, NOISE_DATA_FOLDER)
+    test_loader = create_loaders(test_dataset, batch_size=batch_size, create_val=False)

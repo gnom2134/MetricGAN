@@ -5,7 +5,7 @@ import torch
 
 
 def prepare_signal(signal):
-    signal = signal.squeeze().numpy()
+    signal = signal.squeeze().cpu().numpy()
     n_fft = 512
     signal_length = signal.shape[0]
     signal = librosa.util.fix_length(signal, signal_length + n_fft // 2)
@@ -23,16 +23,12 @@ def prepare_signal(signal):
 
 def back_to_wav(mag, phase, signal_length):
     n_fft = 512
-    rec = np.multiply(mag.detach().numpy(), np.exp(1j * phase).T)
+    rec = np.multiply(mag.detach().cpu().numpy(), np.exp(1j * phase).T)
     result = librosa.istft(rec.squeeze().T,
                            hop_length=n_fft // 2,
                            win_length=n_fft,
                            window=scipy.signal.hanning, length=signal_length)
     return result
-
-
-def prepare_batch_of_signals(batch):
-    return torch.stack([prepare_signal(batch[x].numpy()).T for x in range(batch.shape[0])])
 
 
 if __name__ == "__main__":
