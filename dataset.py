@@ -17,9 +17,8 @@ def add_noise(signal, noise, snr):
     rms_noise_current = np.sqrt(np.mean(noise ** 2))
     noise = noise * (rms_noise_desired / rms_noise_current)
 
-    if len(noise) < len(signal):
-        while len(noise) < len(signal):
-            noise = np.hstack((noise, noise))
+    while len(noise) < len(signal):
+        noise = np.hstack((noise, noise))
     noise = noise[0:len(signal)]
 
     return signal + noise
@@ -45,7 +44,7 @@ class TIMITDataset(Dataset):
     def __getitem__(self, index, sr=16000):
         signal, _ = librosa.load(self.file_paths[index], sr=sr)
         noise, _ = librosa.load(np.random.choice(self.noise_paths), sr=sr)
-        noisy_signal = add_noise(signal, noise, np.random.choice(np.arange(-12, 13, 1)))
+        noisy_signal = add_noise(signal, noise, np.random.choice([-30, -15, 15, 30]))
         return noisy_signal, signal
 
 
@@ -58,16 +57,13 @@ class MixedDataset(Dataset):
         """
         self.timit_dataset = TIMITDataset(folder, noise_folder)
         self.enhanced_signals = enhanced_signals
+        np.random.shuffle(self.enhanced_signals)
 
     def __len__(self):
-        return len(self.timit_dataset) + len(self.enhanced_signals)
+        return min(len(self.timit_dataset), len(self.enhanced_signals))
 
     def __getitem__(self, index):
-        if index >= len(self.timit_dataset):
-            index -= len(self.timit_dataset)
-            return self.enhanced_signals[index]
-        else:
-            return self.timit_dataset[index][1], self.timit_dataset[index][1]
+        return self.enhanced_signals[index], self.timit_dataset[index][1]
 
 
 if __name__ == "__main__":

@@ -11,9 +11,11 @@ class Flatten(nn.Module):
 class Generator(nn.Module):
     def __init__(self, device):
         super().__init__()
+        self.hidden = None
         self.lstm = nn.LSTM(257, 200, num_layers=2, bidirectional=True, dropout=0.15).to(device)
         self.fc = nn.Sequential(
-            nn.Linear(400, 300),
+            nn.Linear(400, 200),
+            nn.Linear(200, 300),
             nn.LeakyReLU(),
             nn.Dropout(0.05),
             nn.Linear(300, 257),
@@ -21,7 +23,7 @@ class Generator(nn.Module):
         ).to(device)
 
     def forward(self, x):
-        x, _ = self.lstm(x)
+        x, h = self.lstm(x)
         x = self.fc.forward(x)
         return x
 
