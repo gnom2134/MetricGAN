@@ -44,7 +44,7 @@ class TIMITDataset(Dataset):
     def __getitem__(self, index, sr=16000):
         signal, _ = librosa.load(self.file_paths[index], sr=sr)
         noise, _ = librosa.load(np.random.choice(self.noise_paths), sr=sr)
-        noisy_signal = add_noise(signal, noise, np.random.choice([-30, -15, 15, 30]))
+        noisy_signal = add_noise(signal, noise, np.random.choice([-12, -6, 0, 6, 12]))
         return noisy_signal, signal
 
 
