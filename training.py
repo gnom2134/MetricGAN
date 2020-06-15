@@ -1,11 +1,10 @@
-import librosa
-from scipy.io.wavfile import write
 from torch.utils.data import SubsetRandomSampler, DataLoader
 from tqdm import tqdm
 import numpy as np
-import torch.nn as nn
 import torch.optim as optim
 import torch
+import matplotlib.pyplot as plt
+import pickle
 
 from models import Generator, Discriminator, DiscriminatorLoss, GeneratorLoss
 from dataset import TIMITDataset, MixedDataset, TRAIN_DATA_FOLDER, TEST_DATA_FOLDER, NOISE_DATA_FOLDER
@@ -14,8 +13,6 @@ from metrics import calculate_pesq, calculate_stoi
 
 
 DEVICE = torch.device("cuda:0")
-
-# TODO: fix connection between generator and discriminator
 
 
 def create_loaders(dataset, batch_size=1, create_val=True):
@@ -36,12 +33,54 @@ def create_loaders(dataset, batch_size=1, create_val=True):
         return DataLoader(dataset, batch_size=batch_size)
 
 
-def calculate_metric(model, data_loader, metric):
-    pass
+def calculate_metric(model, data_loader, metric, data_loader_name='train'):
+    with torch.no_grad():
+        model.eval()
+        damaged_history = []
+        gen_history = []
+        for x, y in tqdm(data_loader, desc='Calculating results on ' + data_loader_name, leave=False):
+            x_norm, x_phase, x_sl = prepare_signal(x.squeeze(), normalize=True)
+            x_non_norm, x_phase_, x_sl_ = prepare_signal(x.squeeze())
+            y, y_phase, y_sl = prepare_signal(y)
+
+            x_norm = x_norm.to(DEVICE)
+            x_non_norm = x_non_norm.to(DEVICE)
+            y = y.to(DEVICE)
+
+            x_norm = x_norm.squeeze().T.unsqueeze(0)
+            x_non_norm = x_non_norm.squeeze().T.unsqueeze(0)
+            y = y.squeeze().T.unsqueeze(0)
+
+            try:
+                metric_value = metric(
+                    back_to_wav(x_non_norm.detach().squeeze().T, x_phase_, x_sl_),
+                    back_to_wav(y.detach().squeeze().T, y_phase, y_sl)
+                )
+            except Exception as err:
+                print(err)
+                metric_value = 0.
+
+            damaged_history.append(metric_value)
+
+            x_gen = x_non_norm * torch.clamp_min(model(x_norm), 0.05)
+
+            try:
+                metric_value = metric(
+                    back_to_wav(x_gen.detach().squeeze().T, x_phase_, x_sl_),
+                    back_to_wav(y.detach().squeeze().T, y_phase, y_sl)
+                )
+            except Exception as err:
+                print(err)
+                metric_value = 0.
+
+            gen_history.append(metric_value)
+
+        return np.mean(damaged_history), np.mean(gen_history)
 
 
-def train_metric_gan(learning_iterations=200, batch_size=1, lr=1e-3, d_epochs=10, g_epochs=10):
-    metric_history = []
+def train_metric_gan(learning_iterations=50, d_lr=1e-3, g_lr=1e-2, d_epochs=1, g_epochs=1, save_generator='generator.pickle'):
+    batch_size = 1
+
     generator = Generator(DEVICE)
     discriminator = Discriminator(DEVICE)
 
@@ -50,98 +89,154 @@ def train_metric_gan(learning_iterations=200, batch_size=1, lr=1e-3, d_epochs=10
     train_loader, val_loader = create_loaders(generator_dataset, batch_size)
 
     discriminator_criterion = DiscriminatorLoss(DEVICE)
-    discriminator_optimizer = optim.Adam(discriminator.network.parameters(), lr=lr, betas=(0.9, 0.999))
-    discriminator_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(discriminator_optimizer, 10, 2)
+    discriminator_optimizer = optim.Adam(
+        discriminator.parameters(),
+        lr=d_lr,
+        betas=(0.9, 0.999)
+    )
 
     generator_criterion = GeneratorLoss(DEVICE, s=1.)
     generator_optimizer = optim.Adam(
-        [{"params": generator.lstm.parameters()}, {"params": generator.fc.parameters()}],
-        lr=lr,
+        generator.parameters(),
+        lr=g_lr,
         betas=(.9, .999)
     )
-    generator_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(generator_optimizer, 10, 2)
 
-    for _ in tqdm(range(learning_iterations), desc='GAN learning iteration'):
+    val_history = []
+    train_history = []
+
+    for iteration in tqdm(range(learning_iterations), desc='GAN learning iteration'):
         generated_data = []
+
+        if iteration % 10 == 0:
+            val_history.append(calculate_metric(generator, val_loader, calculate_pesq, data_loader_name='val')[1])
+            train_history.append(calculate_metric(generator, train_loader, calculate_pesq)[1])
 
         with torch.no_grad():
             generator.eval()
             for x, y in tqdm(train_loader, desc='Generating data...', leave=False):
-                x, phase, sl = prepare_signal(x)
-                x = x.to(DEVICE)
-                x = x.reshape((1, -1, 257))
-                generated_data.append((back_to_wav(x * np.maximum(0.05, generator(x).cpu().numpy()), phase, sl), y))
+                x_norm, x_phase, x_sl = prepare_signal(x.squeeze(), normalize=True)
+                x_non_norm, x_phase_, x_sl_ = prepare_signal(x.squeeze())
+                x_norm = x_norm.to(DEVICE)
+                x_norm = x_norm.squeeze().T.unsqueeze(0)
+                x_non_norm = x_non_norm.to(DEVICE)
+                x_non_norm = x_non_norm.squeeze().T.unsqueeze(0)
+
+                generated_data.append((back_to_wav((x_non_norm * torch.clamp_min(generator(x_norm), 0.05)).squeeze().T, x_phase_, x_sl_), y))
 
         d_dataset = MixedDataset(generated_data, TRAIN_DATA_FOLDER, NOISE_DATA_FOLDER)
-        d_train_loader, d_val_loader = create_loaders(d_dataset, batch_size=batch_size)
+        d_train_loader = create_loaders(d_dataset, batch_size=batch_size, create_val=False)
 
-        generator.train(False)
+        generator.train(True)
         discriminator.train(True)
         p_bar = tqdm(range(d_epochs), desc="Training discriminator...", leave=False)
         for epoch in p_bar:
-            for x, y in tqdm(d_train_loader, desc="I'm just doing my thing...", leave=False):
-                x, phase, sl = prepare_signal(x)
+            p_bar_2 = tqdm(d_train_loader, desc="I'm just doing my thing...", leave=False)
+            for (x, y), clear_s in p_bar_2:
+                x_non_norm, x_phase_, x_sl_ = prepare_signal(x)
                 y, y_phase, y_sl = prepare_signal(y)
-                x = x.to(DEVICE)
-                y = y.to(DEVICE)
+                clear_s, s_phase, s_sl = prepare_signal(clear_s)
 
-                x = x.reshape((1, -1, 257))
-                y = y.reshape((1, -1, 257))
+                x_non_norm = x_non_norm.to(DEVICE)
+                y = y.to(DEVICE)
+                clear_s = clear_s.to(DEVICE)
+
+                x_non_norm = x_non_norm.squeeze().T.unsqueeze(0)
+                y = y.squeeze().T.unsqueeze(0)
+                clear_s = clear_s.squeeze().T.unsqueeze(0)
 
                 try:
-                    metric = calculate_stoi(back_to_wav(x, phase, sl), back_to_wav(y, y_phase, y_sl))
+                    metric = calculate_pesq(
+                        back_to_wav(x_non_norm.detach().squeeze().T, x_phase_, x_sl_),
+                        back_to_wav(y.detach().squeeze().T, y_phase, y_sl)
+                    )
                 except Exception as err:
                     print(err)
                     metric = 0.
 
-                discriminator_optimizer.zero_grad()
-                res = discriminator(x, y)
+                discriminator.zero_grad()
+
+                res = discriminator(x_non_norm, y)
                 loss = discriminator_criterion(res, metric)
                 loss.backward()
+
+                clear_res = discriminator(clear_s, clear_s)
+                loss = discriminator_criterion(clear_res, 1.)
+                loss.backward()
+
                 discriminator_optimizer.step()
 
-                print(f"Metric: {metric}, discriminator error: {np.abs(res.detach().cpu().numpy() - metric)}")
+                p_bar_2.set_description(desc=f"Metric: {metric}, discriminator error: {np.abs(res.detach().cpu().numpy() - metric)}, discriminator value: {res.detach().cpu().numpy()}")
 
-            discriminator_scheduler.step()
             p_bar.set_description(desc=f"Training discriminator... Epoch: {epoch}")
 
-        avg_metric = 0
-        generator.train(True)
-        discriminator.train(False)
         p_bar = tqdm(range(g_epochs), desc="Training generator...", leave=False)
         for epoch in p_bar:
-            for x, y in tqdm(train_loader, desc="I'm just doing my thing...", leave=False):
-                x, phase, sl = prepare_signal(x)
+            metric_history = []
+            p_bar_2 = tqdm(train_loader, desc="I'm just doing my thing...", leave=False)
+            for x, y in p_bar_2:
+                x_norm, x_phase, x_sl = prepare_signal(x, normalize=True)
+                x_non_norm, x_phase_, x_sl_ = prepare_signal(x)
                 y, y_phase, y_sl = prepare_signal(y)
-                x = x.reshape((1, -1, 257))
-                y = y.reshape((1, -1, 257))
+
+                x_non_norm = x_non_norm.to(DEVICE)
+                x_norm = x_norm.to(DEVICE)
+                y = y.to(DEVICE)
+
+                x_norm = x_norm.squeeze().T.unsqueeze(0)
+                x_non_norm = x_non_norm.squeeze().T.unsqueeze(0)
+                y = y.squeeze().T.unsqueeze(0)
 
                 try:
-                    metric = calculate_stoi(back_to_wav(x, phase, sl), back_to_wav(y, y_phase, y_sl))
+                    metric_start = calculate_pesq(
+                        back_to_wav(x_non_norm.detach().squeeze().T, x_phase_, x_sl_),
+                        back_to_wav(y.detach().squeeze().T, y_phase, y_sl)
+                    )
                 except Exception as err:
                     print(err)
-                    metric = 0.
+                    metric_start = 0.
 
-                generator_optimizer.zero_grad()
-                res = discriminator(x, y)
-                loss = generator_criterion(res, metric)
+                generator.zero_grad()
+                discriminator.zero_grad()
+                x_gen = x_non_norm * torch.clamp_min(generator(x_norm), 0.05)
+
+                try:
+                    metric_gen = calculate_pesq(
+                        back_to_wav(x_gen.detach().squeeze().T, x_phase_, x_sl_),
+                        back_to_wav(y.detach().squeeze().T, y_phase, y_sl)
+                    )
+                except Exception as err:
+                    print(err)
+                    metric_gen = 0.
+
+                res = discriminator(x_gen, y)
+                loss = generator_criterion(res)
                 loss.backward()
                 generator_optimizer.step()
-                avg_metric = res.detach().cpu().numpy()
 
-                print(f"Metric: {metric}")
+                metric_history.append(metric_gen)
+                p_bar_2.set_description(desc=f'Start metric: {metric_start}, Generated metric: {metric_gen}, Metric improvement: {metric_gen - metric_start}')
 
-            generator_scheduler.step()
-            p_bar.set_description(desc=f"Training generator... Epoch: {epoch}, avg_metric: {avg_metric}")
+            p_bar.set_description(desc=f"Training generator... Epoch: {epoch}, avg_metric: {np.mean(metric_history)}")
 
-        metric_history.append(avg_metric)
+        with open(save_generator, 'wb') as file:
+            pickle.dump(generator, file)
 
-    return generator
+    return generator, train_history, val_history
 
 
 if __name__ == "__main__":
-    batch_size = 1
-    trained_generator = train_metric_gan(batch_size=batch_size)
+    trained_generator, train_history, val_history = train_metric_gan()
+
+    plt.plot(val_history, label='val')
+    plt.plot(train_history, label='train')
+    plt.legend()
+    plt.show()
 
     test_dataset = TIMITDataset(TEST_DATA_FOLDER, NOISE_DATA_FOLDER)
-    test_loader = create_loaders(test_dataset, batch_size=batch_size, create_val=False)
+    test_loader = create_loaders(test_dataset, batch_size=1, create_val=False)
+
+    print(
+        'Trained generator on test with pesq metric(before, after):',
+        calculate_metric(trained_generator, test_loader, calculate_pesq, data_loader_name='test')
+    )
