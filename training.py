@@ -9,10 +9,10 @@ import pickle
 from models import Generator, Discriminator, DiscriminatorLoss, GeneratorLoss
 from dataset import TIMITDataset, MixedDataset, TRAIN_DATA_FOLDER, TEST_DATA_FOLDER, NOISE_DATA_FOLDER
 from preprocessing import prepare_signal, back_to_wav
-from metrics import calculate_pesq, calculate_stoi
+from metrics import calculate_stoi
 
 
-DEVICE = torch.device("cuda:0")
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 def create_loaders(dataset, batch_size=1, create_val=True):
@@ -109,8 +109,8 @@ def train_metric_gan(learning_iterations=50, d_lr=1e-3, g_lr=1e-2, d_epochs=1, g
         generated_data = []
 
         if iteration % 10 == 0:
-            val_history.append(calculate_metric(generator, val_loader, calculate_pesq, data_loader_name='val')[1])
-            train_history.append(calculate_metric(generator, train_loader, calculate_pesq)[1])
+            val_history.append(calculate_metric(generator, val_loader, calculate_stoi, data_loader_name='val')[1])
+            train_history.append(calculate_metric(generator, train_loader, calculate_stoi)[1])
 
         with torch.no_grad():
             generator.eval()
@@ -146,7 +146,7 @@ def train_metric_gan(learning_iterations=50, d_lr=1e-3, g_lr=1e-2, d_epochs=1, g
                 clear_s = clear_s.squeeze().T.unsqueeze(0)
 
                 try:
-                    metric = calculate_pesq(
+                    metric = calculate_stoi(
                         back_to_wav(x_non_norm.detach().squeeze().T, x_phase_, x_sl_),
                         back_to_wav(y.detach().squeeze().T, y_phase, y_sl)
                     )
@@ -188,7 +188,7 @@ def train_metric_gan(learning_iterations=50, d_lr=1e-3, g_lr=1e-2, d_epochs=1, g
                 y = y.squeeze().T.unsqueeze(0)
 
                 try:
-                    metric_start = calculate_pesq(
+                    metric_start = calculate_stoi(
                         back_to_wav(x_non_norm.detach().squeeze().T, x_phase_, x_sl_),
                         back_to_wav(y.detach().squeeze().T, y_phase, y_sl)
                     )
@@ -201,7 +201,7 @@ def train_metric_gan(learning_iterations=50, d_lr=1e-3, g_lr=1e-2, d_epochs=1, g
                 x_gen = x_non_norm * torch.clamp_min(generator(x_norm), 0.05)
 
                 try:
-                    metric_gen = calculate_pesq(
+                    metric_gen = calculate_stoi(
                         back_to_wav(x_gen.detach().squeeze().T, x_phase_, x_sl_),
                         back_to_wav(y.detach().squeeze().T, y_phase, y_sl)
                     )
@@ -238,5 +238,5 @@ if __name__ == "__main__":
 
     print(
         'Trained generator on test with pesq metric(before, after):',
-        calculate_metric(trained_generator, test_loader, calculate_pesq, data_loader_name='test')
+        calculate_metric(trained_generator, test_loader, calculate_stoi, data_loader_name='test')
     )

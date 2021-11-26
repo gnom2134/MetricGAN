@@ -36,7 +36,6 @@ numpy==1.18.5
 packaging==20.4
 pandocfilters==1.4.2
 parso==0.7.0
-pesq==0.0.1
 pexpect==4.8.0
 pickleshare==0.7.5
 prometheus-client==0.8.0
@@ -60,8 +59,8 @@ SoundFile==0.10.3.post1
 terminado==0.8.3
 testpath==0.4.4
 threadpoolctl==2.1.0
-torch==1.5.0
-torchaudio==0.5.0
+torch
+torchaudio
 tornado==6.0.4
 tqdm==4.46.1
 traitlets==4.3.3
